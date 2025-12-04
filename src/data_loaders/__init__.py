@@ -4,6 +4,7 @@ import data_loaders.transforms
 import data_loaders.modelnet as modelnet
 from data_loaders.collate_functions import collate_pair
 from data_loaders.threedmatch import ThreeDMatchDataset
+from data_loaders.breast_phantom import BreastPhantomDataset
 
 import torchvision
 
@@ -38,6 +39,12 @@ def get_dataloader(cfg, phase, num_workers=0):
         elif phase == 'test':
             dataset = modelnet.get_test_datasets(cfg)
 
+    elif cfg.dataset == 'breast_phantom':
+        dataset = BreastPhantomDataset(
+            cfg=cfg,
+            phase=phase,
+            transforms=None,
+        )
     else:
         raise AssertionError('Invalid dataset')
 

@@ -58,7 +58,7 @@ if opt.config is None:
 cfg = EasyDict(load_config(opt.config))
 
 # Hack: Stores different datasets to its own subdirectory
-opt.logdir = os.path.join(opt.logdir, cfg.dataset)
+opt.logdir = os.path.join(opt.logdir, cfg.dataset.dataset)
 
 if opt.name is None and len(cfg.get('expt_name', '')) > 0:
     opt.name = cfg.expt_name

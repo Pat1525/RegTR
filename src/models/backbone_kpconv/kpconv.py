@@ -3,7 +3,7 @@
 
 from typing import List
 
-import MinkowskiEngine as ME
+# import MinkowskiEngine as ME
 import numpy as np
 import torch.nn
 import torch.nn.functional as F
@@ -15,6 +15,8 @@ from pytorch3d.ops import packed_to_padded, ball_query
 # from .cpp_wrappers.cpp_neighbors import radius_neighbors as cpp_neighbors
 from .kpconv_blocks import *
 
+from warpconvnet.geometry.types.points import Points
+from warpconvnet.ops.reductions import REDUCTIONS
 
 _logger = logging.getLogger(__name__)
 
@@ -212,33 +214,49 @@ def batch_grid_subsampling_kpconv(points, batches_len, features=None, labels=Non
 
 def batch_grid_subsampling_kpconv_gpu(points, batches_len, features=None, labels=None, sampleDl=0.1, max_p=0):
     """
-    Same as batch_grid_subsampling, but implemented in GPU. This is a hack by using Minkowski
-    engine's sparse quantization functions
-    Note: This function is not deterministic and may return subsampled points
-      in a different ordering, which will cause the subsequent steps to differ slightly.
+    Rewritten using WarpConvNet.
+    Performs grid subsampling (quantization) on a batch of points.
     """
-
     if labels is not None or features is not None:
         raise NotImplementedError('subsampling not implemented for features and labels')
     if max_p != 0:
         raise NotImplementedError('subsampling only implemented by considering all points')
 
-    B = len(batches_len)
-    batch_start_end = torch.nn.functional.pad(torch.cumsum(batches_len, 0), (1, 0))
-    device = points[0].device
+    # 1. Split the stacked points into a list of tensors (one per batch item).
+    # WarpConvNet's 'from_list' methods typically handle variable-length clouds this way.
+    # points: (N_total, 3) -> list of (N_i, 3)
+    batch_points_list = torch.split(points, batches_len.cpu().tolist())
 
-    coord_batched = ME.utils.batched_coordinates(
-        [points[batch_start_end[b]:batch_start_end[b + 1]] / sampleDl for b in range(B)], device=device)
-    sparse_tensor = ME.SparseTensor(
-        features=points,
-        coordinates=coord_batched,
-        quantization_mode=ME.SparseTensorQuantizationMode.UNWEIGHTED_AVERAGE
+    # 2. Create the Points object.
+    # We pass the points list as *both* coordinates and features.
+    # This ensures that when we reduce (average) the features, we are averaging the point positions,
+    # which effectively calculates the centroid of each voxel.
+    pc = Points.from_list_of_coordinates(
+        batch_points_list, 
+        features=batch_points_list,  # Use coords as features to get centroids
+        device=points.device
     )
 
-    s_points = sparse_tensor.features
-    s_len = torch.tensor([f.shape[0] for f in sparse_tensor.decomposed_features], device=device)
-    return s_points, s_len
+    # 3. Voxelize with MEAN reduction.
+    # This corresponds to ME.SparseTensorQuantizationMode.UNWEIGHTED_AVERAGE
+    voxels = pc.to_voxels(voxel_size=sampleDl, reduction=REDUCTIONS.MEAN)
 
+    # 4. Extract the subsampled points (centroids) and new batch lengths.
+    # 'voxels.features' contains the averaged features (which are our centroids).
+    s_points = voxels.features
+
+    # WarpConvNet Voxels typically store indices as (batch_idx, x, y, z).
+    # We can compute the new batch lengths by counting the occurrences of each batch index.
+    # Note: Check your specific WarpConvNet version; usually .indices or .coordinates holds this.
+    if hasattr(voxels, 'indices'):
+        batch_indices = voxels.indices[:, 0] # Assuming column 0 is batch index
+    else:
+        # Fallback if specific attribute differs, usually accessible via coords
+        batch_indices = voxels.coordinates[:, 0]
+
+    s_len = torch.bincount(batch_indices.long(), minlength=len(batches_len)).to(points.device)
+
+    return s_points, s_len
 
 def batch_neighbors_kpconv(queries, supports, q_batches, s_batches, radius, max_neighbors):
     """
